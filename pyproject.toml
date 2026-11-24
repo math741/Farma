@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genesis-omega"
+version = "0.1.0"
+description = "GENESIS Ω — The Living Cosmos: a persistent artificial universe with developmental organisms, an observer-side Scientist and a 3D/WebXR observatory."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.4", "playwright>=1.40"]
+
+[project.scripts]
+genesis-omega = "genesis_omega.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["genesis_omega*"]
+
+[tool.setuptools.package-data]
+genesis_omega = ["viewer/static/*", "viewer/static/*/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+markers = ["slow: long-running test (deselect with -m 'not slow')"]

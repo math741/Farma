@@ -117,23 +117,50 @@ class EventLog:
             return [e for e in self.events if e.utick >= since_utick and (world is None or e.world == world)
                     and (not types or e.type in types)]
 
-    def load_jsonl(self) -> int:
-        """Reload the in-memory index from disk after a restart."""
+    def load_jsonl(self, max_id: int | None = None) -> int:
+        """Reload the in-memory index from disk after a restart.
+
+        Events with ``id > max_id`` were written after the checkpoint being resumed: they
+        belong to a continuation that no longer exists (a crash between checkpoints).
+        They are moved — never deleted — to ``events.discarded-<time>.jsonl`` so the
+        main log stays consistent with the timeline and event ids are never reused."""
         if not self.path or not os.path.exists(self.path):
             return 0
-        evs = []
+        self.close()
+        evs, keep_lines, dropped = [], [], []
         with open(self.path, encoding="utf-8") as fh:
             for line in fh:
-                line = line.strip()
-                if not line:
+                s = line.strip()
+                if not s:
                     continue
                 try:
-                    d = json.loads(line)
+                    d = json.loads(s)
                 except json.JSONDecodeError:
-                    continue  # a torn final line after a crash
+                    dropped.append(s)  # a torn final line after a crash
+                    continue
+                if max_id is not None and int(d.get("id", 0)) > max_id:
+                    dropped.append(s)
+                    continue
+                keep_lines.append(s)
                 d.pop("label", None)
                 evs.append(Event(**d))
+        if dropped:
+            import time as _time
+
+            base = self.path[:-len(".jsonl")] if self.path.endswith(".jsonl") else self.path
+            with open(f"{base}.discarded-{_time.strftime('%Y%m%d-%H%M%S')}-{_time.time_ns()}.jsonl", "w",
+                      encoding="utf-8") as fh:
+                fh.write("\n".join(dropped) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            tmp = f"{self.path}.tmp-{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write("".join(x + "\n" for x in keep_lines))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self.path)
         self.events = evs[-self.keep:]
+        self.discarded = len(dropped)
         return len(evs)
 
 

@@ -366,6 +366,10 @@ class Universe:
         f.__dict__.update({k: v for k, v in self.__dict__.items()
                            if k not in ("worlds", "chronicles", "events", "scientist", "keyframes", "frozen",
                                         "storage", "forks", "pantheon", "ids", "_pending_post_freeze")})
+        # everything a timeline mutates must be its own copy, or a fork would write into its parent
+        # (the galaxy's F0 biospheres advance per timeline; analyses are per-timeline observations)
+        for k in ("galaxy", "cfg", "latest_comm", "social_stats", "levels", "construction"):
+            setattr(f, k, copy.deepcopy(getattr(self, k)))
         f.timeline = fid
         f.parent = self.timeline
         f.storage = storage
@@ -557,7 +561,7 @@ class Universe:
         u.intervention_lock = bool(st.get("lock", True))
         u.levels = st.get("levels", {})
         u.latest_comm = st.get("latest_comm", {})
-        u.events.load_jsonl()
+        u.events.load_jsonl(max_id=u.ids.peek("event"))
         return u
 
 

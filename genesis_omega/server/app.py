@@ -29,6 +29,9 @@ from ..version import PROTOCOL_VERSION, version_info
 from .protocol import encode, json_safe
 
 log = get_logger("server")
+RUNNER = web.AppKey("runner", object)
+AUTH = web.AppKey("auth", dict)
+CLIENTS = web.AppKey("clients", set)
 STATIC = os.path.join(os.path.dirname(os.path.dirname(__file__)), "viewer", "static")
 THREE_CDN = "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js"
 
@@ -44,7 +47,7 @@ def _token(request: web.Request) -> str:
 
 
 def role_of(request: web.Request) -> str | None:
-    auth = request.app["auth"]
+    auth = request.app[AUTH]
     t = _token(request)
     if not t:
         return None
@@ -64,7 +67,6 @@ async def auth_middleware(request: web.Request, handler):
             return web.json_response({"error": "unauthorized"}, status=401)
         if path.startswith("/api/admin") and role != "admin":
             return web.json_response({"error": "admin token required"}, status=403)
-        request["role"] = role
     resp = await handler(request)
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
@@ -81,7 +83,7 @@ def _bin(kind, arrays, meta=None):
 
 
 async def _in_sim(request, fn, timeout=60.0):
-    runner = request.app["runner"]
+    runner = request.app[RUNNER]
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: runner.call(fn, timeout=timeout))
 
@@ -130,12 +132,12 @@ def encode_agents(fr: dict, roi: dict | None, cap: int) -> tuple[dict, int]:
         "lat": np.round(lat[idx] / (math.pi / 2) * 32767).astype(np.int16),
         "lon": np.round(lon[idx] / math.pi * 32767).astype(np.int16),
         "bearing": np.round(b / math.pi * 32767).astype(np.int16),
-        "species": fr["species"][idx].astype(np.uint16),
+        "species": fr["species"][idx].astype(np.uint32),
         "bits": fr["bits"][idx].astype(np.uint16),
-        "energy": np.round(fr["energy"][idx] * 255).astype(np.uint8),
+        "energy": np.round(np.clip(fr["energy"][idx], 0, 1) * 255).astype(np.uint8),
         "mass": np.round(np.clip(fr["mass"][idx] / 20.0, 0, 1) * 255).astype(np.uint8),
-        "emit": np.round(fr["emit"][idx] * 255).astype(np.uint8),
-        "aquatic": np.round(fr["aquatic"][idx] * 255).astype(np.uint8),
+        "emit": np.round(np.clip(fr["emit"][idx], 0, 1) * 255).astype(np.uint8),
+        "aquatic": np.round(np.clip(fr["aquatic"][idx], 0, 1) * 255).astype(np.uint8),
     }
     return arrays, n
 
@@ -143,9 +145,9 @@ def encode_agents(fr: dict, roi: dict | None, cap: int) -> tuple[dict, int]:
 # ------------------------------------------------------------------ app
 def make_app(runner, auth: dict) -> web.Application:
     app = web.Application(middlewares=[auth_middleware], client_max_size=2 * 1024 * 1024)
-    app["runner"] = runner
-    app["auth"] = auth
-    app["clients"] = set()
+    app[RUNNER] = runner
+    app[AUTH] = auth
+    app[CLIENTS] = set()
     r = app.router
 
     async def index(request):
@@ -164,7 +166,7 @@ def make_app(runner, auth: dict) -> web.Application:
     # ------------------------------------------------------- read-only API
     async def hello(request):
         u = runner.u
-        return _json({"role": request["role"], "protocol": PROTOCOL_VERSION, "versions": version_info(),
+        return _json({"role": role_of(request), "protocol": PROTOCOL_VERSION, "versions": version_info(),
                       "cosmos": u.label, "utick": u.utick, "timelines": ["PRIME"] + list(runner.forks.keys()),
                       "worlds": len(u.worlds), "server_time": time.time()})
 
@@ -468,8 +470,8 @@ def make_app(runner, auth: dict) -> web.Application:
     async def ws_handler(request):
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1 << 20)
         await ws.prepare(request)
-        app["clients"].add(ws)
-        role = request["role"]
+        app[CLIENTS].add(ws)
+        role = role_of(request)
         sub = {"world": 0, "timeline": "PRIME", "roi": None, "max_agents": 3000, "rate": 10.0}
         sent_seq, field_seq, struct_seq, ev_id, last_status = -1, -1, -1, 0, 0.0
         await ws.send_str(json.dumps({"type": "hello", "role": role, "protocol": PROTOCOL_VERSION,
@@ -499,12 +501,37 @@ def make_app(runner, auth: dict) -> web.Application:
                             pass
 
         rtask = asyncio.ensure_future(reader())
+        loop = asyncio.get_running_loop()
+        ev_tl, last_fork_frame, last_fork_fields = "PRIME", 0.0, 0.0
+
+        def in_sim(fn):
+            return loop.run_in_executor(None, lambda: runner.call(fn, timeout=30))
+
         try:
             while not ws.closed:
                 t0 = time.time()
                 snap = runner.hub.snapshot()
                 wi = sub["world"]
-                if sub["timeline"] == "PRIME":
+                tl = sub["timeline"]
+                fork = runner.forks.get(tl) if tl != "PRIME" else None
+                if fork is not None and 0 <= wi < len(fork.worlds) and t0 - last_fork_frame >= 0.5:
+                    # forks are not published to the frame hub: sample them from the sim thread at ≤ 2 Hz
+                    fw = fork.worlds[wi]
+                    fr = await in_sim(lambda rr: dict(fw.agents_frame(), tick=fw.tick))
+                    arrays, total = encode_agents(fr, sub["roi"], sub["max_agents"])
+                    await ws.send_bytes(encode("agents", arrays, {"world": wi, "tick": fr["tick"], "total": total,
+                                                                   "timeline": tl, "t": time.time()}))
+                    last_fork_frame = time.time()
+                    if last_fork_frame - last_fork_fields >= 2.0:
+                        f = await in_sim(lambda rr: fw.fields_export())
+                        await ws.send_bytes(encode("fields", {k: v for k, v in f.items() if isinstance(v, np.ndarray)},
+                                                   {"w": f["w"], "h": f["h"], "world": wi, "timeline": tl}))
+                        s = await in_sim(lambda rr: fw.structure_cells())
+                        await ws.send_bytes(encode("structures", {"cell": s["cell"].astype(np.uint32), "h": s["h"],
+                                                                  "mat": s["mat"], "age": s["age"]},
+                                                   {"world": wi, "timeline": tl, "w": fw.grid.W, "h": fw.grid.H}))
+                        last_fork_fields = time.time()
+                if tl == "PRIME":
                     if snap["seq"] != sent_seq and wi in snap["agents"]:
                         tr = request.transport
                         buffered = tr.get_write_buffer_size() if tr is not None else 0
@@ -529,20 +556,29 @@ def make_app(runner, auth: dict) -> web.Application:
                                                        {"world": wi}))
                         struct_seq = snap["struct_deltas"][wi][-1][0]
                 if time.time() - last_status >= 1.0:
-                    u = runner.u if sub["timeline"] == "PRIME" else runner.forks.get(sub["timeline"], runner.u)
-                    new = u.events.since(ev_id, 0, 200)
+                    if tl != ev_tl:                      # another timeline: its own event numbering
+                        ev_id, ev_tl = 0, tl
+                    if tl == "PRIME":
+                        u, st = runner.u, snap["status"]
+                    else:
+                        u = fork
+                        st = await in_sim(lambda rr: fork.status()) if fork is not None else None
+                    new = u.events.since(ev_id, 0, 200) if u is not None else []
                     if new:
                         ev_id = new[-1]["id"]
-                    await ws.send_str(json.dumps(json_safe({"type": "status", "status": snap["status"],
+                    await ws.send_str(json.dumps(json_safe({"type": "status", "timeline": tl, "missing": u is None,
+                                                            "status": st if st is not None else snap["status"],
                                                             "telemetry": snap["telemetry"], "events": new}),
                                                  default=str))
                     last_status = time.time()
                 await asyncio.sleep(max(0.01, 1.0 / sub["rate"] - (time.time() - t0)))
         except (ConnectionResetError, RuntimeError):
             pass
+        except Exception as e:  # never kill the server for one client; the viewer reconnects
+            log.warning(f"websocket stream ended: {e!r}")
         finally:
             rtask.cancel()
-            app["clients"].discard(ws)
+            app[CLIENTS].discard(ws)
         return ws
 
     r.add_get("/ws", ws_handler)

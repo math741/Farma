@@ -231,9 +231,16 @@ class Runner:
             except Exception as e:
                 self.halted = f"recovery impossible: {e!r}"
                 return False
+            self.u.events.close()
             fresh = Universe.from_state(self.cfg, self.storage, state)
             fresh.scientist.control_results = self.u.scientist.control_results
+            had_worker = self.u.scientist.worker is not None
+            self.u.scientist.stop_worker()           # research in flight studied the discarded continuation
             self.u.__dict__.update(fresh.__dict__)
+            # the restored scientist must point at this (same) Universe object, not the temporary one
+            self.u.scientist.u = self.u
+            if had_worker:
+                self.u.scientist.start_worker()
             src = os.path.basename(path)
         else:
             self.halted = "recovery impossible: no keyframe and no storage"
@@ -251,23 +258,25 @@ class Runner:
         now = time.time()
         self.ooms.append(now)
         recent = [t for t in self.ooms if now - t < 300]
-        sci = self.u.scientist
-        sci.lab_batch = max(8, sci.lab_batch // 2)
-        if len(recent) == 1:
-            self.u.emit("RESOURCE_LIMIT", f"Out of memory: science batch reduced to {sci.lab_batch}",
-                        epistemic=Epistemic.PROGRAMMED.value, significance=SIG_NOTABLE)
-            self._restore_latest("out-of-memory")
-        elif len(recent) == 2:
-            for w in self.u.worlds:
-                w.max_births = max(2, w.max_births // 2)
-            self.u.emit("RESOURCE_LIMIT", "Repeated out of memory: active fidelity reduced (fewer simultaneous "
-                        "births per tick)", epistemic=Epistemic.PROGRAMMED.value, significance=SIG_NOTABLE,
-                        detail={"max_births": [w.max_births for w in self.u.worlds]})
-            self._restore_latest("repeated out-of-memory")
-        else:
+        if len(recent) > 2:
             self.halted = "halted after repeated out-of-memory; checkpoint preserved"
             self.u.emit("SIMULATION_HALTED", self.halted, epistemic=Epistemic.PROGRAMMED.value,
                         significance=SIG_NOTABLE)
+            return
+        batch = max(8, self.u.scientist.lab_batch // 2)
+        births = [max(2, w.max_births // 2) for w in self.u.worlds]
+        self._restore_latest("out-of-memory" if len(recent) == 1 else "repeated out-of-memory")
+        # reductions are applied *after* the rollback, otherwise restoring the state would undo them
+        self.u.scientist.lab_batch = batch
+        if len(recent) == 1:
+            self.u.emit("RESOURCE_LIMIT", f"Out of memory: science batch reduced to {batch}",
+                        epistemic=Epistemic.PROGRAMMED.value, significance=SIG_NOTABLE)
+        else:
+            for w, b in zip(self.u.worlds, births):
+                w.max_births = b
+            self.u.emit("RESOURCE_LIMIT", "Repeated out of memory: active fidelity reduced (fewer simultaneous "
+                        "births per tick)", epistemic=Epistemic.PROGRAMMED.value, significance=SIG_NOTABLE,
+                        detail={"max_births": [w.max_births for w in self.u.worlds], "lab_batch": batch})
 
     def _on_crash(self, e: BaseException) -> None:
         self._record_failure("crash", e)

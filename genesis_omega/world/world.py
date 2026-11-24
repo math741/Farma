@@ -379,6 +379,10 @@ class World:
         mk = mark_out * p.mark_gain
         for c in range(2):
             self.marks[c].view(-1).index_add_(0, cell, mk[:, c])
+        n_store, n_mark = torch.stack([store.sum(), (mark_out.sum(1) > 0).sum()]).tolist()
+        self.counters["stores"] += int(n_store)
+        self.counters["marks"] += int(n_mark)
+        self.acc[1] += emit.sum()
         sound_src = torch.zeros(cfg.emit_bands, HW, device=dev)
         sound_src.index_add_(1, cell, (emit * p.emit_gain).t())
         scent_src = torch.zeros(2, HW, device=dev)
@@ -526,9 +530,11 @@ class World:
                 0, b_mat[nb] * HW + c[nb], use[nb])
             dflat.copy_((dflat.reshape(-1) - take).clamp(min=0).view(N_BASE, HW))
         recipes = torch.stack([a_mat, b_mat, band], 1)
-        ids, new_ids = self.materials.register_products(prod, recipes, t, A.id[idx], c, A.lineage[idx])
+        ids, new_ids = self.materials.register_products(prod, recipes, t, A.id[idx], c, A.lineage[idx],
+                                                             A.species[idx])
         A.carried_mat[idx] = ids
         A.carried_amt[idx] = use
+        self.acc[3] += use.sum()
         self.materials.produced.index_add_(0, ids, torch.ones_like(ids))
         first = ~A.made[idx, ids]
         A.made[idx, ids] = True
@@ -573,6 +579,7 @@ class World:
         self.struct_builder.view(-1).copy_(torch.where(lin >= 0, lin, self.struct_builder.view(-1)))
         A.carried_amt[idx] = amt - placed
         self.materials.built.index_add_(0, mid, placed)
+        self.acc[2] += placed.sum()
         self.counters["builds"] += int(idx.numel())
 
     def _die(self, dead, cause, cell, mass, t) -> None:
@@ -581,8 +588,9 @@ class World:
         c = cell[idx]
         corpse = (A.energy[idx].clamp(min=0) + 0.3 * mass[idx] * p.eat_eff) / p.eat_eff
         self.R.view(-1).index_add_(0, c, corpse)
-        # carried material is dropped where the organism died (an artefact on the ground)
-        drop = (A.carried_amt[idx] > 0.01) & (A.carried_mat[idx] >= 0)
+        # carried material is dropped where the organism died (an artefact on the ground);
+        # at sea it sinks out of reach — water never holds structures (same rule as building)
+        drop = (A.carried_amt[idx] > 0.01) & (A.carried_mat[idx] >= 0) & (self.oceanf[c] < 0.5)
         if bool(drop.any()):
             dc, dm, da = c[drop], A.carried_mat[idx][drop], A.carried_amt[idx][drop]
             self.struct_h.view(-1).index_add_(0, dc, da)
@@ -830,7 +838,23 @@ class World:
             d["max_generation"] = int(A.generation[act].max())
             d["mean_mass"] = round(float(A.caps[act, CAP["mass"]].mean()), 3)
             d["mean_units"] = round(float(A.caps[act, CAP["units"]].mean()), 2)
+        observed = [m for iv in self.interventions if iv.get("op") == "observe" for m in iv.get("metrics", [])]
+        if observed:
+            d["observed"] = {k: v for k, v in self.metrics().items() if k in observed}
         return d
+
+    def metrics(self) -> dict:
+        """The closed metric vocabulary of the Scientist DSL (``observe`` steps), measured now."""
+        A = self.agents
+        n = A.count()
+        c = self.counters
+        acc = self.acc.tolist()
+        return {"population": n, "mean_energy": round(float(A.energy[A.active].mean()), 4) if n else 0.0,
+                "births": c["births"], "deaths": c["deaths"], "kills": c["kills"],
+                "structure_cells": int((self.struct_h > 0.05).sum()), "materials": self.materials.n,
+                "eaten": round(acc[0], 3), "emission_rate": round(acc[1] / max(self.tick, 1), 5),
+                "species_alive": sum(1 for s in self.species.species.values() if s["extinct"] is None),
+                "reactions": c["reactions"], "builds": c["builds"]}
 
     def agent_detail(self, agent_id: int) -> dict | None:
         A = self.agents
