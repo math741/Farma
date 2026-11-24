@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Genesis Ω Observatory</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<script type="importmap">{"imports": {"three": "/static/vendor/three.module.min.js"}}</script>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="fade"></div>
+
+<!-- start screen -->
+<section id="start">
+  <div class="start-inner">
+    <div class="sigil">Ω</div>
+    <h1>GENESIS <span>Ω</span></h1>
+    <p class="sub">The Living Cosmos</p>
+    <p id="start-status" class="status-line">connecting to the cosmos…</p>
+    <button id="enter" disabled>ENTER COSMOS</button>
+    <p class="fine">Everything you will see corresponds to the state of a running simulation.<br>
+      Labels say what is <b>simulated</b>, <b>measured</b>, <b>inferred</b> or <b>programmed</b>.</p>
+  </div>
+</section>
+
+<!-- HUD -->
+<header id="hud" class="hidden">
+  <div id="hud-left">
+    <div id="hud-cosmos">—</div>
+    <div id="hud-clock">—</div>
+    <div id="hud-backend" class="pill">—</div>
+  </div>
+  <nav id="modes">
+    <button data-mode="galaxy" title="Galaxy">✦<span>Galaxy</span></button>
+    <button data-mode="system" title="Star system">◎<span>System</span></button>
+    <button data-mode="planet" title="Planet">◍<span>Planet</span></button>
+    <span class="sep"></span>
+    <button data-panel="history" title="History">⌛<span>History</span></button>
+    <button data-panel="science" title="Science">⚗<span>Science</span></button>
+    <button data-panel="life" title="Lineages">❦<span>Life</span></button>
+    <button data-panel="tech" title="Technology">⚙<span>Tech</span></button>
+    <button data-panel="status" title="System status">☷<span>Status</span></button>
+    <button data-panel="admin" title="Admin" id="admin-btn" class="hidden">⚑<span>Admin</span></button>
+  </nav>
+  <div id="hud-right">
+    <select id="timeline" title="Timeline"></select>
+    <select id="overlay" title="Planet overlay">
+      <option value="0">natural</option><option value="1">temperature</option><option value="2">primary production</option>
+      <option value="3">moisture</option><option value="4">occupancy</option><option value="5">structures</option>
+      <option value="6">trails</option><option value="7">shelter</option><option value="8">marks</option>
+    </select>
+    <button id="xr-vr" class="pill hidden">VR</button>
+    <button id="xr-ar" class="pill hidden">PORTAL</button>
+    <button id="audio" class="pill" title="Sonification (not speech)">♪</button>
+  </div>
+</header>
+
+<aside id="panel" class="hidden"><button class="close" data-close="panel">×</button><div id="panel-body"></div></aside>
+<aside id="inspector" class="hidden"><button class="close" data-close="inspector">×</button><div id="insp-body"></div></aside>
+
+<footer id="timeline-bar" class="hidden">
+  <canvas id="tl-canvas"></canvas>
+  <div id="tl-tip" class="hidden"></div>
+</footer>
+
+<div id="labels"></div>
+<div id="toasts"></div>
+<div id="tooltip" class="hidden"></div>
+<div id="replay-badge" class="hidden">REPLAY · recorded frames <span></span> <button id="replay-stop">exit</button></div>
+<div id="offline" class="hidden">BACKEND OFFLINE — showing last known state (cycle <span></span>). Reconnecting…</div>
+
+<script type="module" src="/static/js/main.js"></script>
+</body>
+</html>
